@@ -1,0 +1,166 @@
+import os
+import sys
+import numpy as np
+import pandas as pd
+import math
+import time
+from datetime import datetime, timedelta, tzinfo
+import glob # get image files
+import matplotlib.pyplot as plt
+from IPython.display import clear_output
+from PIL import Image
+import cv2
+import mediapipe as mp
+from mediapipe.python.solutions import pose as mp_pose
+import torch
+import streamlit as st
+
+
+# read sample images
+sample_image_path = r'C:\Users\EricWang\Pictures\sample_images'
+sample_images = [cv2.imread(file) for file in glob.glob(os.path.join(sample_image_path, '*.png'))]
+len(sample_images)
+
+# get model 
+yolo_model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+
+# set model class
+yolo_model.classes = [0] # only detect person
+yolo_model.conf = 0.7
+
+# setup streamlit 
+st.set_page_config(page_title='Real-time group dynamics dashboard v0.1'
+                  ,page_icon='tick'
+                  ,layout='wide'
+                  )
+st.title('Real-time group dynamics dashboard')
+placeholder = st.empty()
+
+# setup loop and result storage 
+i = 0
+storage = {}
+
+
+# run loop and get measurements
+while True:
+    
+    for img in sample_images:
+        #time0 = time.time()
+        
+        result = yolo_model(img)
+        
+        # get result image size
+        result_height = result.ims[0].shape[0]
+        result_width = result.ims[0].shape[1]
+        print('INFO: result image height: {}\nINFO: result image width: {}'.format(result_height, result_width))
+        
+        # result details
+        df_result_xywh = result.pandas().xywh[0]
+        # merge xywh and xyxy: detection results of 'person', i.e., 'name'=='person' (or 'class'==0)
+        df_result_person = result.pandas().xyxy[0]
+        df_result_person[['xcenter','ycenter','width','height']] = df_result_xywh[['xcenter','ycenter','width','height']]
+        # filter 'person', sort by confidence
+        df_result_person = df_result_person[df_result_person['name']=='person'].sort_values('confidence', ascending=False)
+        # reset index
+        df_result_person.index = range(df_result_person.shape[0])
+        # add person id column
+        df_result_person['p'] = ['p' + str(i) for i in df_result_person.index.to_list()]
+        
+        # N
+        N = df_result_person.shape[0]
+        print('INFO: Number of detected person: {}'.format(N))
+        
+        # GPD
+        # bb_width: Xmax of the most RHS person - Xmin of the most LHS person, i.e., largest Xmax - lowest Xmin
+        bb_width = df_result_person['xmax'].max() - df_result_person['xmin'].min()
+        ## bb_height: for each person, image total height - Ymin of each person
+        avg_height = np.mean([result_height - df_result_person.loc[i,'ymin'] for i in range(N)])
+        # get Group Physical Density
+        GPD = 1*1e6/(bb_width * avg_height)
+        print('INFO: Person bounding boxes width: {}\nINFO: Person average height: {}'.format(bb_width, avg_height))
+        print('INFO: Group Physical Density (GPD): {}'.format(GPD))
+        
+        # SD
+        df_SD = df_result_person[['p','xcenter']].assign(key=1).merge(df_result_person[['p','xcenter']].assign(key=1), on='key', suffixes=('','_y'))
+        df_SD['distance'] = df_SD.apply(lambda x: x.xcenter - x.xcenter_y, axis=1)
+        df_SD = (df_SD.set_index(df_result_person[['p','xcenter']].columns.to_list()+['p_y'])['distance']
+                  .unstack()
+                  .add_prefix('dist_')
+                  .reset_index())
+        
+        # merge SD in
+        df_result_person = df_result_person.merge(df_SD)
+        
+        # calculate SD
+        SD_sum = df_SD.iloc[:,-N:].abs().sum().sum()/2
+        SD_avg = SD_sum/N
+        print('INFO: total SD: {}\nINFO: average SD: {}'.format(SD_sum, SD_avg))
+        
+        # construct results
+        # add timestamp
+        current_time = datetime.now()
+        current_time_str = current_time.strftime('%Y-%m-%d_%H:%M:%S.%f')[:-3]
+        # save results
+        storage.update({current_time_str:{'N':N, 'GPD':GPD, 'SD_sum':SD_sum, 'SD_avg':SD_avg}})
+        
+        # display
+        # resize result image according to scale_percent
+        scale_percent = 30 # %
+        width_ = int(result_width * scale_percent / 100)
+        height_ = int(result_height * scale_percent / 100)
+        dim = (width_, height_)
+    #     print(dim)
+        result.render()
+        resized = cv2.resize(result.ims[0], dim, interpolation=cv2.INTER_AREA)
+    #     cv2.imshow('result', result.ims[0])
+        cv2.imshow('Resized image', resized)
+        output_path = 'output'
+        file_name = 'sample_image_detected_resized_' + str(i) + '.jpg'
+        cv2.imwrite(os.path.join(output_path, file_name), resized)
+        print('INFO: result image saved to {}\{}'.format(output_path, file_name))
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        i+=1
+
+#    break
+
+        df_result_final = pd.DataFrame.from_dict(storage).T 
+
+        N = df_result_final.iloc[-1,0]
+        GPD = df_result_final.iloc[-1,1]
+        SD_sum_current = df_result_final.iloc[-1,2]
+        SD_avg_current = df_result_final.iloc[-1,3]
+        SD_sum_all = df_result_final.iloc[:,2].sum()
+        SD_avg_all = df_result_final.iloc[:,3].mean()
+        
+        with placeholder.container():
+            
+            st.markdown('## Current KPIs x4: N, GPD, SD, Average SD')
+            kpi1,kpi2,kpi3,kpi4 = st.columns(4)
+            kpi1.metric(label="Number of people", value=N)
+            kpi2.metric(label="Group Physical Density (GPD)", value=GPD)
+            kpi3.metric(label="Current social distance", value=SD_sum_current)
+            kpi4.metric(label='Current average distance', value=SD_avg_current)
+            
+            st.markdown('## Overall KPIs x2: Overall Total SD, Overall Average Distance')
+            kpi5,kpi6 = st.columns(2)
+            kpi5.metric(label='Overall Total Distance', value=SD_sum_all)
+            kpi6.metric(label="Overall Average Distance", value=SD_avg_all)
+
+            st.markdown('## Timestamped group dynamics measurements')
+            col7,col8 = st.columns(2)
+            col7.dataframe(df_result_final, use_container_width=False)
+            col8.image(resized, use_column_width=True, channels='BGR', caption='Group dynamics')
+            
+            st.dataframe(df_result_person, use_container_width=True)
+            
+            time.sleep(1)
+    
+    break
+            
+if cv2.waitKey(10) & 0xFF == ord('q'):
+    cv2.destroyAllWindows()
+
+
+print('aaaa')
+cv2.destroyAllWindows()
