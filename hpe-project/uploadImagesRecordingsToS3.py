@@ -69,7 +69,7 @@ client_s3.put_object(Body=byte_buffer.getvalue()
                      , Bucket=glue_bucket
                      , Key='ml/eric-test/Address/images-{}.tar.gz'.format(filename_output))
 print("INFO: Images successfully saved.")
-print("Images upload time duration: {:.2f} minutes".format((time()-time0)/60)
+print("Images upload time duration: {:.2f} minutes".format((time()-time0)/60))
 
 
 
@@ -91,4 +91,4 @@ client_s3.put_object(Body=byte_buffer.getvalue()
                      , Bucket=glue_bucket
                      , Key='ml/eric-test/Address/recordings-{}.tar.gz'.format(filename_output))
 print("INFO: Recordings successfully saved.")
-print("Recordings upload time duration: {:.2f} minutes".format((time()-time0)/60)
+print("Recordings upload time duration: {:.2f} minutes".format((time()-time0)/60))
